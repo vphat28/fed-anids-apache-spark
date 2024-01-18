@@ -1,1 +1,2 @@
 - Build image in docker-files/fed-learning `docker build . -t fed-spark-node`
+- docker exec fed-spark_spark-master_1 spark-submit --master spark://spark-master:7077 /app/spark-fed.py

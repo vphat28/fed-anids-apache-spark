@@ -3,6 +3,8 @@ version: '3.8'
 services:
   spark-master:
     image: fed-spark-node
+    volumes:
+    - ./app:/app
     environment:
       - SPARK_MODE=master
     ports:
