@@ -1,4 +1,7 @@
-- Build image in docker-files/fed-learning `cd docker-files/fed-learning/` `docker build . -t fed-spark-node`
+- Build image in docker-files/fed-learning
+```
+cd docker-files/fed-learning/` `docker build . -t fed-spark-node
+```
 - Start docker cluster `docker-compose up`
 - Submit job
 ```bash
