@@ -1,52 +1,83 @@
-# Import the necessary modules
 import keras
 import tensorflow as tf
 from keras.layers import Input, Dense
 from keras.models import Model
 from pyspark.sql import SparkSession
 import numpy as np
-# Import the Elephas library for distributed Keras on Spark
 from elephas.spark_model import SparkModel
 from pyspark import SparkContext
+from pyspark.ml.feature import VectorAssembler
+from elephas.utils.rdd_utils import to_simple_rdd
+import pyspark.ml.classification as cl
+import pyspark.sql.functions as F
 
+# Initialize SparkContext and SparkSession
 spark_context = SparkContext.getOrCreate()
+spark = SparkSession.builder.master("local[10]").appName("HeartDiseaseSpark").getOrCreate()
 
-# Create a Spark session with 10 nodes
-spark = SparkSession.builder.master("local[10]").appName("Spark MNIST Example").getOrCreate()
+# Load the Heart Disease dataset from CSV
+data = spark.read.format("csv").option("header", "true").load("/app/ids.csv")
 
-# Load the MNIST data as a NumPy array
-(x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+# Rename columns to remove leading and trailing spaces
+trimmed_column_names = [F.trim(F.col(col)).alias(col.strip()) for col in data.columns]
+data = data.select(trimmed_column_names)
 
-# Normalize the images to the range of [0, 1]
-x_train = x_train.astype("float32") / 255
-x_test = x_test.astype("float32") / 255
+# Trim spaces from all column values
+trimmed_data = data.select([F.trim(F.col(col)).alias(col) for col in data.columns])
 
-# Flatten the images to 1D vectors
-x_train = x_train.reshape(-1, 784)
-x_test = x_test.reshape(-1, 784)
+# Replace null or NaN values in the 'Label' column
+trimmed_data = trimmed_data.withColumn(
+    "Label",
+    F.when(F.col("Label").isNull() | F.isnan(F.col("Label")), 0).otherwise(F.col("Label"))
+)
 
-# Define the model architecture
-model = keras.Sequential([
-  Dense(256, activation="relu", input_shape=(784,)),
-  Dense(128, activation="relu"),
-  Dense(10, activation="softmax")
-])
+# Convert 'BENIGN' to 1 and other values to 0 in the 'Label' column
+trimmed_data = trimmed_data.withColumn(
+    "Label",
+    F.when(F.col("Label") == "BENIGN", 1).otherwise(0)
+)
 
-# Compile the model with loss, optimizer and metrics
-model.compile(loss="sparse_categorical_crossentropy", optimizer="adam", metrics=["accuracy"])
+# Cast all columns to double
+for col_name in trimmed_data.columns:
+    trimmed_data = trimmed_data.withColumn(col_name, F.col(col_name).cast("double"))
 
-# Create a Spark model from the Keras model
-spark_model = SparkModel(model, frequency='epoch', mode='asynchronous')
+# Replace NaN and Infinity values in feature columns
+feature_columns = [col for col in trimmed_data.columns if col != "Label"]
+for col_name in feature_columns:
+    trimmed_data = trimmed_data.withColumn(
+        col_name,
+        F.when(F.isnan(F.col(col_name)) | F.col(col_name).isNull(), 0).otherwise(F.col(col_name))
+    )
+    trimmed_data = trimmed_data.withColumn(
+        col_name,
+        F.when(F.col(col_name) == float("inf"), float("1e10")).otherwise(F.col(col_name))
+    )
+    trimmed_data = trimmed_data.withColumn(
+        col_name,
+        F.when(F.col(col_name) == -float("inf"), -float("1e10")).otherwise(F.col(col_name))
+    )
 
-# Convert numpy to spark dataframe
-x_train_df = spark_context.parallelize(x_train, 10)
+# Assemble features into a single vector
+assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+assembled_data = assembler.transform(trimmed_data)
 
-# Train the model on the train set using Spark
-spark_model.fit(x_train_df, validation_ratio=0.2, batch_size=32, epochs=100, verbose=0, workers=10)
+# Create logistic regression model
+lr = cl.LogisticRegression(maxIter=100, labelCol="Label", featuresCol="features")  # Adjust hyperparameters as needed
 
-# Evaluate the model on the test set using Spark
-score = spark_model.evaluate(x_test, y_test, batch_size=32, verbose=0, workers=10)
-print(f"The accuracy is {score[1]:.4f}")
+# Fit the model
+print("We are about to take off")
+model = lr.fit(assembled_data)
 
-# Stop the Spark session
+print("Training is done")
+
+# Evaluate the model
+predictions = model.transform(assembled_data)
+
+# Calculate accuracy
+correct_predictions = predictions.filter(predictions.Label == predictions.prediction).count()
+total_data = assembled_data.count()
+accuracy = correct_predictions / float(total_data)
+
+print("\033[32mAccuracy:\033[0m", accuracy)  # Green
+
 spark.stop()
