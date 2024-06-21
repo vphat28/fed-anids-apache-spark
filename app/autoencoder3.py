@@ -1,24 +1,20 @@
-import keras
-import tensorflow as tf
-from keras.layers import Input, Dense
-from keras.models import Model
+from pyspark import SparkContext, SparkConf
 from pyspark.sql import SparkSession
-import numpy as np
-from elephas.spark_model import SparkModel
-from pyspark import SparkContext
-from pyspark.ml.feature import VectorAssembler
+from pyspark.sql.functions import col
 from elephas.utils.rdd_utils import to_simple_rdd
-import pyspark.ml.classification as cl
+from elephas.spark_model import SparkModel
+from keras.models import Sequential, Model
+from keras.layers import Input, Dense
+
 import pyspark.sql.functions as F
 
-# Initialize SparkContext and SparkSession
-spark_context = SparkContext.getOrCreate()
-spark = SparkSession.builder.master("local[10]").appName("AnomalyDetection").getOrCreate()
+# Step 1: Initialize SparkContext and SparkSession
+conf = SparkConf().setAppName('AutoencoderTraining').setMaster('local[*]')
+sc = SparkContext(conf=conf)
+spark = SparkSession(sc)
 
-# Load the Heart Disease dataset from CSV
+# Step 2: Load and preprocess your dataset (replace with your actual preprocessing steps)
 data = spark.read.format("csv").option("header", "true").load("/app/ids.csv")
-
-# Rename columns to remove leading and trailing spaces
 trimmed_column_names = [F.trim(F.col(col)).alias(col.strip()) for col in data.columns]
 data = data.select(trimmed_column_names)
 
@@ -56,28 +52,30 @@ for col_name in feature_columns:
         col_name,
         F.when(F.col(col_name) == -float("inf"), -float("1e10")).otherwise(F.col(col_name))
     )
+data = trimmed_data
+# Step 3: Convert data to RDD for Elephas
+rdd_data = to_simple_rdd(spark, data)
 
-# Assemble features into a single vector
-assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
-assembled_data = assembler.transform(trimmed_data)
+# Step 4: Define the Autoencoder model using Keras
+input_dim = len(data.columns)  # Number of features
+encoding_dim = 32
 
-# Create logistic regression model
-lr = cl.LogisticRegression(maxIter=100, labelCol="Label", featuresCol="features")  # Adjust hyperparameters as needed
+input_layer = Input(shape=(input_dim,))
+encoded = Dense(256, activation='relu')(input_layer)
+encoded = Dense(128, activation='relu')(encoded)
+encoded = Dense(encoding_dim, activation='relu')(encoded)
 
-# Fit the model
-print("We are about to take off")
-model = lr.fit(assembled_data)
+decoded = Dense(128, activation='relu')(encoded)
+decoded = Dense(256, activation='relu')(decoded)
+decoded = Dense(input_dim, activation='linear')(decoded)
 
-print("Training is done")
+autoencoder = Model(input_layer, decoded)
 
-# Evaluate the model
-predictions = model.transform(assembled_data)
+# Step 5: Wrap the model with SparkModel
+spark_model = SparkModel(autoencoder, frequency='epoch', mode='asynchronous')
 
-# Calculate accuracy
-correct_predictions = predictions.filter(predictions.Label == predictions.prediction).count()
-total_data = assembled_data.count()
-accuracy = correct_predictions / float(total_data)
+# Step 6: Train the autoencoder model using SparkModel
+spark_model.train(rdd_data, nb_epoch=10, batch_size=256, verbose=1)
 
-print("\033[32mAccuracy:\033[0m", accuracy)  # Green
-
+# Step 7: Stop SparkSession
 spark.stop()

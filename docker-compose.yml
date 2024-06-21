@@ -17,6 +17,8 @@ services:
 
   spark-worker:
     image: fed-spark-node
+    volumes:
+      - ./app:/app
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
